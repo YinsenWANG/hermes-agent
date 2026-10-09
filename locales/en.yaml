@@ -757,6 +757,8 @@ gateway:
     usage: "Usage: /queue <prompt>"
     queued: "Queued for the next turn."
     queued_depth: " ({depth} queued)"
+    full: "Queue full — this message was not accepted. Please resend later."
+    unavailable: "Queue unavailable — this message was not accepted. Please resend later."
 
   steer:
     usage: "Usage: /steer <prompt>"

@@ -714,18 +714,14 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             self._hm_merge_pending_for_source(source, _quick_key, event, merge_text=True)  # picked up after start
             return None
         if self._draining:
-            queue_during_drain = self._queue_during_drain_enabled(effective_busy_input_mode)
-            if queue_during_drain:
-                self._queue_or_replace_pending_event(_quick_key, event)
-            return (
-                t("gateway.busy.drain_queued", action=self._status_action_gerund())
-                if queue_during_drain
-                else t("gateway.busy.drain_rejected", action=self._status_action_gerund())
-            )
+            if self._queue_during_drain_enabled(effective_busy_input_mode):
+                return self._queue_followup_reply(
+                    _quick_key, event, t("gateway.busy.drain_queued", action=self._status_action_gerund()),
+                )
+            return t("gateway.busy.drain_rejected", action=self._status_action_gerund())
         if effective_busy_input_mode == "queue":
             logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
-            self._queue_or_replace_pending_event(_quick_key, event)
-            return None
+            return self._queue_followup_reply(_quick_key, event)
         if effective_busy_input_mode == "steer":
             self._hm_busy_steer(event, running_agent, _quick_key)
             return None

@@ -1,6 +1,7 @@
 """Profile-specific busy-input behavior for multiplexed gateways."""
 
 import asyncio
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -101,7 +102,7 @@ async def _load_profile_snapshot(
 @pytest.mark.parametrize(
     ("secondary_mode", "handled", "expected_action", "expected_text_mode"),
     [
-        ("queue", False, "queue", "queue"),
+        ("queue", True, "queue", "queue"),
         ("steer", True, "steer", "interrupt"),
         ("interrupt", True, "interrupt", "interrupt"),
     ],
@@ -134,6 +135,11 @@ async def test_secondary_profile_busy_mode_controls_live_busy_behavior(
     assert result is handled
     assert adapter._busy_text_mode == expected_text_mode
     if expected_action == "queue":
+        # The runner owns admission so the adapter must not enqueue/debounce it again.
+        assert event._gateway_accepted is True
+        assert adapter._pending_messages[session_key] is event
+        assert runner._queue_depth(session_key, adapter=adapter) == 1
+        assert not runner._overflow_queue(session_key)
         agent.steer.assert_not_called()
         agent.interrupt.assert_not_called()
     elif expected_action == "steer":
@@ -145,6 +151,61 @@ async def test_secondary_profile_busy_mode_controls_live_busy_behavior(
     else:
         agent.steer.assert_not_called()
         agent.interrupt.assert_called_once_with("follow up")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack_enabled", ["true", "false"])
+async def test_secondary_profile_queue_admission_through_adapter(
+    tmp_path, monkeypatch, ack_enabled,
+):
+    """Busy queue text is admitted once as separate turns; a full queue refuses it."""
+    monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", ack_enabled)
+    runner = _runner(default_mode="interrupt")
+    adapter = await _load_profile_snapshot(runner, tmp_path / "research", "queue")
+    adapter.send = AsyncMock(return_value=SendResult(success=True))
+    first, second, refused = (_event(profile="research") for _ in range(3))
+    first.text, second.text, refused.text = "first", "second", "refused"
+    key = runner._session_key_for_source(first.source)
+    agent = MagicMock()
+    agent._active_children = []
+    runner._running_agents[key] = agent
+    runner._session_state(key).turn.busy_ack_ts = time.time()
+    adapter._active_sessions[key] = asyncio.Event()
+    adapter._session_tasks[key] = asyncio.current_task()
+
+    await adapter.handle_message(first)
+    await adapter.handle_message(second)
+
+    assert first._gateway_accepted is True
+    assert second._gateway_accepted is True
+    assert adapter._pending_messages[key] is first
+    assert first.text == "first"
+    assert runner._overflow_queue(key) == [second]
+    assert runner._queue_depth(key, adapter=adapter) == 2
+    assert not adapter._text_debounce_store()
+    adapter.send.assert_not_awaited()  # accepted receipts are debounced
+
+    for index in range(runner._BUSY_QUEUE_MAX_PENDING - 2):
+        filler = _event(profile="research")
+        filler.text = f"filler-{index}"
+        await adapter.handle_message(filler)
+        assert filler._gateway_accepted is True
+    before = list(runner._overflow_queue(key))
+
+    await adapter.handle_message(refused)
+
+    assert refused._gateway_accepted is False
+    assert adapter._pending_messages[key] is first
+    assert runner._overflow_queue(key) == before
+    assert runner._queue_depth(key, adapter=adapter) == runner._BUSY_QUEUE_MAX_PENDING
+    assert not adapter._text_debounce_store()
+    adapter.send.assert_awaited_once()
+    reply = adapter.send.await_args.kwargs["content"]
+    assert "not accepted" in reply.lower()
+    assert "queued" not in reply.lower()
+    agent.steer.assert_not_called()
+    agent.interrupt.assert_not_called()
+    assert runner._busy_input_mode == "interrupt"
 
 
 @pytest.mark.asyncio
